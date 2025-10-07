@@ -3,9 +3,11 @@ const Parser = require('rss-parser');
 const cron = require('node-cron');
 const parser = new Parser();
 
-const token = '8497045436:AAFH-5jGPVHLqgTlimPhgLWzbClEqhuWEeM'; // put your bot token here
+// For Railway/production: get token from environment variable
+const token = process.env.TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 
+// RSS feeds for categories
 const feeds = {
   tech: "https://feeds.feedburner.com/TechCrunch/",
   world: "http://feeds.bbci.co.uk/news/world/rss.xml",
@@ -24,7 +26,7 @@ function formatDate(dt) {
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 }
 
-// Helper to split and send long messages in chunks safe for Telegram
+// Helper: Send long messages in safe chunks for Telegram
 async function sendLongMessage(chatId, text, options = {}) {
   const limit = 4096;
   while (text.length > 0) {
@@ -33,15 +35,33 @@ async function sendLongMessage(chatId, text, options = {}) {
     if (lastNewline > 0 && lastNewline > limit - 100) {
       chunk = chunk.slice(0, lastNewline);
     }
-    await bot.sendMessage(chatId, chunk, options);
+    await bot.sendMessage(chatId, chunk, options).catch(err => {
+      if (err.response && err.response.body && err.response.body.description &&
+          err.response.body.description.includes('blocked by the user')) {
+        console.log('Message blocked by user/chat:', chatId);
+      } else {
+        console.error('Send error:', err);
+      }
+    });
     text = text.slice(chunk.length);
   }
 }
 
+// Store user chat IDs for safe digest delivery (instead of hardcoding)
+const digestSubscribers = new Set();
+
+// Main handler – add user to digest subscribers on /start
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userInput = msg.text.trim().toLowerCase();
   const categories = Object.keys(feeds);
+
+  // If user sends /start, add to digest list
+  if (msg.text.toLowerCase() === '/start') {
+    digestSubscribers.add(chatId);
+    await bot.sendMessage(chatId, "👋 Welcome! Type a category like `tech`, `world`, `business` or any keyword to see news. You will also receive daily digests if you stay subscribed.", { parse_mode: 'Markdown' });
+    return;
+  }
 
   if (categories.includes(userInput)) {
     await bot.sendMessage(chatId, `Getting news for *${userInput}*, please wait...`, { parse_mode: 'Markdown' });
@@ -135,11 +155,9 @@ bot.on('message', async (msg) => {
   }
 });
 
-// DAILY DIGEST CODE (optional)
-const digestChatId = "123456789"; // Replace with your chat id
-
+// DAILY DIGEST – send to all subscribed users at 8am every day
 cron.schedule('0 8 * * *', async () => {
-  const category = 'tech'; // Or loop for multiple categories
+  const category = 'tech'; // Can loop through more categories if desired
   try {
     const feed = await parser.parseURL(feeds[category]);
     const now = new Date();
@@ -171,8 +189,10 @@ cron.schedule('0 8 * * *', async () => {
     if (days.length === 0) {
       reply += "\nNo headlines in the last 24 hours!";
     }
-    await sendLongMessage(digestChatId, reply, { parse_mode: 'Markdown', disable_web_page_preview: false });
+    for (let chatId of digestSubscribers) {
+      await sendLongMessage(chatId, reply, { parse_mode: 'Markdown', disable_web_page_preview: false });
+    }
   } catch (e) {
-    await bot.sendMessage(digestChatId, "⚠️ Failed to send daily digest.");
+    console.error("Failed to send daily digest:", e);
   }
 });
